@@ -1,0 +1,476 @@
+{
+  "name": "History × Psychology — Full YouTube Automation Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [1, 3, 5],
+              "triggerAtHour": 14,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "node_schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [100, 300],
+      "notes": "Triggers Mon/Wed/Fri at 2PM. Change days/time to match your upload schedule."
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": "YOUR_GOOGLE_SHEET_ID",
+        "sheetName": "Topics",
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "STATUS",
+              "lookupValue": "PENDING"
+            }
+          ]
+        },
+        "options": {
+          "returnFirstMatch": true
+        }
+      },
+      "id": "node_sheets_read",
+      "name": "Get Next Topic",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [300, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Google Sheets Account"
+        }
+      },
+      "notes": "Reads the next PENDING row from your topics sheet. Sheet columns: TOPIC | STATUS | YOUTUBE_URL | PUBLISH_DATE | PILLAR | NOTES"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $credentials.geminiApiKey }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contents",
+              "value": "=[{\"parts\":[{\"text\":\"You are a YouTube content creator for 'Mindset of History', a channel combining historical analysis with psychology.\\n\\nTopic: {{ $json.TOPIC }}\\n\\nGenerate a complete video production package. Return ONLY valid JSON with these exact fields:\\n{\\n  \\\"subject\\\": \\\"full name\\\",\\n  \\\"era\\\": \\\"historical period\\\",\\n  \\\"hook_fact\\\": \\\"most shocking psychological fact (1 sentence)\\\",\\n  \\\"wikipedia_search_term\\\": \\\"best Wikipedia search term for real photo\\\",\\n  \\\"full_narration\\\": \\\"complete 2000-word voiceover script structured as: HOOK(30s) > SETUP(90s) > ACT1(240s) > ACT2(240s) > REVELATION(180s) > APPLICATION(120s) > CTA(25s)\\\",\\n  \\\"veo_prompts\\\": [\\n    \\\"8 cinematic Veo prompts. Each: [era] setting, [camera movement], [lighting], [mood], no text, no watermarks, photorealistic, 16:9\\\",\\n    \\\"...\\\",\\n    \\\"...\\\",\\n    \\\"...\\\",\\n    \\\"...\\\",\\n    \\\"...\\\",\\n    \\\"...\\\",\\n    \\\"...\\\"\\n  ],\\n  \\\"seo_title\\\": \\\"YouTube title max 60 chars with psychological hook\\\",\\n  \\\"seo_title_b\\\": \\\"Alternative A/B test title\\\",\\n  \\\"seo_description\\\": \\\"500-word YouTube description with keywords, timestamps placeholder, and subscribe CTA\\\",\\n  \\\"seo_tags\\\": [\\\"15 relevant YouTube tags\\\"],\\n  \\\"chapters\\\": \\\"YouTube chapter timestamps starting at 0:00\\\",\\n  \\\"thumbnail_concept\\\": \\\"thumbnail design brief: subject face + psychological label + color scheme\\\"\\n}\"}]}]"
+            },
+            {
+              "name": "generationConfig",
+              "value": "{\"responseMimeType\":\"application/json\",\"temperature\":0.7,\"maxOutputTokens\":8192}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "id": "node_gemini_script",
+      "name": "Gemini — Research + Script + SEO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300],
+      "notes": "Single Gemini call generates: full narration script, 8 Veo scene prompts, SEO title/description/tags/chapters. ~$0.003 per video."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Gemini response and extract the JSON\nconst rawResponse = $input.first().json;\nlet parsed;\n\ntry {\n  // Gemini returns content in candidates[0].content.parts[0].text\n  const text = rawResponse.candidates[0].content.parts[0].text;\n  parsed = JSON.parse(text.replace(/```json|```/g, '').trim());\n} catch(e) {\n  // Fallback: try parsing rawResponse directly\n  parsed = rawResponse;\n}\n\n// Add metadata\nparsed.topic_input = $('Get Next Topic').first().json.TOPIC;\nparsed.pillar = $('Get Next Topic').first().json.PILLAR;\nparsed.generation_timestamp = new Date().toISOString();\n\n// Calculate publish time (schedule 3 days from now at 3PM)\nconst publishDate = new Date();\npublishDate.setDate(publishDate.getDate() + 3);\npublishDate.setHours(15, 0, 0, 0);\nparsed.scheduled_publish_time = publishDate.toISOString();\n\n// Create temp file paths\nparsed.voiceover_path = `/tmp/voiceover_${Date.now()}.mp3`;\nparsed.final_video_path = `/tmp/final_${Date.now()}.mp4`;\nparsed.clips_dir = `/tmp/clips_${Date.now()}`;\n\nreturn [{ json: parsed }];"
+      },
+      "id": "node_parse_gemini",
+      "name": "Parse Gemini Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300],
+      "notes": "Extracts and validates Gemini JSON response. Adds scheduling timestamp."
+    },
+    {
+      "parameters": {
+        "command": "=mkdir -p {{ $json.clips_dir }} && pip install notebooklm-py -q 2>/dev/null; notebooklm create '{{ $json.subject }} Psychology Analysis' 2>/dev/null; notebooklm source add 'https://en.wikipedia.org/wiki/{{ $json.wikipedia_search_term.replace(/ /g, \"_\") }}' --wait 2>/dev/null; notebooklm generate video --style cinematic --wait 2>/dev/null; notebooklm download video {{ $json.clips_dir }}/notebooklm_base.mp4 2>/dev/null; echo 'NOTEBOOKLM_DONE'"
+      },
+      "id": "node_notebooklm",
+      "name": "NotebookLM — Base Video Draft",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [900, 180],
+      "notes": "Uses notebooklm-py CLI. REQUIRES: pip install notebooklm-py + one-time: notebooklm login on your server. Generates base cinematic video from Wikipedia sources."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrsearch={{ encodeURIComponent($json.wikipedia_search_term) }}&gsrnamespace=6&prop=imageinfo&iiprop=url&iiurlwidth=1920&gsrlimit=3",
+        "options": {}
+      },
+      "id": "node_wikimedia",
+      "name": "Wikimedia — Get Real Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300],
+      "notes": "Fetches real public domain historical photos. Completely free, no API key. Returns direct image URLs for download."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract best image URL from Wikimedia response\nconst wikiData = $input.first().json;\nconst pages = wikiData.query?.pages || {};\nconst pageList = Object.values(pages);\n\nlet bestImageUrl = null;\nfor (const page of pageList) {\n  if (page.imageinfo?.[0]?.thumburl) {\n    bestImageUrl = page.imageinfo[0].thumburl;\n    break;\n  }\n}\n\nconst previousData = $('Parse Gemini Response').first().json;\nreturn [{ json: { ...previousData, real_photo_url: bestImageUrl } }];"
+      },
+      "id": "node_parse_wiki",
+      "name": "Extract Photo URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.real_photo_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "node_download_photo",
+      "name": "Download Real Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, 300],
+      "notes": "Downloads the historical photo as binary data for use in FFmpeg."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split veo_prompts array into individual items for batch processing\nconst data = $('Parse Gemini Response').first().json;\nconst prompts = data.veo_prompts || [];\n\nreturn prompts.map((prompt, index) => ({\n  json: {\n    ...data,\n    current_prompt: prompt,\n    scene_index: index + 1,\n    output_clip_path: `${data.clips_dir}/clip_${String(index + 1).padStart(2, '0')}.mp4`\n  }\n}));"
+      },
+      "id": "node_split_prompts",
+      "name": "Split Into Scene Prompts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 420],
+      "notes": "Splits 8 Veo prompts into individual items for batch HTTP calls to fal.ai"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://fal.run/fal-ai/veo3",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Key YOUR_FAL_AI_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "={{ $json.current_prompt }}"
+            },
+            {
+              "name": "duration",
+              "value": "8"
+            },
+            {
+              "name": "aspect_ratio",
+              "value": "16:9"
+            },
+            {
+              "name": "generate_audio",
+              "value": "true"
+            }
+          ]
+        }
+      },
+      "id": "node_fal_veo",
+      "name": "Fal.ai — Generate Video Clip",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 420],
+      "notes": "Calls fal.ai Veo 3.1 API. ~$0.80 per 8-second clip. Returns video URL. Replace YOUR_FAL_AI_API_KEY with your actual key from fal.ai dashboard."
+    },
+    {
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "node_wait_fal",
+      "name": "Wait for Generation",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1300, 420],
+      "notes": "Veo generation takes 20-60 seconds. Adjust wait time if needed."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.video?.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "node_download_clip",
+      "name": "Download Video Clip",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1500, 420],
+      "notes": "Downloads the generated video clip as binary. Will be merged in FFmpeg assembly step."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://texttospeech.googleapis.com/v1/text:synthesize",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_GOOGLE_CLOUD_ACCESS_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={\n  \"input\": {\n    \"ssml\": \"<speak><prosody rate='0.92' pitch='-1.5st'>{{ $json.full_narration.replace(/'/g, '\\\\u0027') }}</prosody></speak>\"\n  },\n  \"voice\": {\n    \"languageCode\": \"en-US\",\n    \"name\": \"en-US-Neural2-D\",\n    \"ssmlGender\": \"MALE\"\n  },\n  \"audioConfig\": {\n    \"audioEncoding\": \"MP3\",\n    \"sampleRateHertz\": 44100,\n    \"effectsProfileId\": [\"large-home-entertainment-class-device\"]\n  }\n}"
+      },
+      "id": "node_tts",
+      "name": "Google TTS — Neural2 Voiceover",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 540],
+      "notes": "Google Cloud Neural2-D voice. Deep, authoritative narrator. ~$0.05 per video. Requires Google Cloud project with TTS API enabled. Replace access token with OAuth2 credential."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decode base64 audio from Google TTS response\nconst ttsResponse = $input.first().json;\nconst audioBase64 = ttsResponse.audioContent;\nconst audioBuffer = Buffer.from(audioBase64, 'base64');\n\nreturn [{\n  json: $('Parse Gemini Response').first().json,\n  binary: {\n    voiceover: {\n      data: audioBase64,\n      mimeType: 'audio/mpeg',\n      fileName: 'voiceover.mp3'\n    }\n  }\n}];"
+      },
+      "id": "node_decode_audio",
+      "name": "Decode TTS Audio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 540]
+    },
+    {
+      "parameters": {
+        "command": "=# Save voiceover\nVOICEOVER_PATH=\"{{ $json.voiceover_path }}\"\nCLIPS_DIR=\"{{ $json.clips_dir }}\"\nFINAL_PATH=\"{{ $json.final_video_path }}\"\n\n# Create clips concat list\necho '' > /tmp/concat_list.txt\nfor clip in $(ls $CLIPS_DIR/clip_*.mp4 2>/dev/null | sort); do\n  echo \"file '$clip'\" >> /tmp/concat_list.txt\ndone\n\n# Add NotebookLM base video if it exists\nif [ -f \"$CLIPS_DIR/notebooklm_base.mp4\" ]; then\n  echo \"file '$CLIPS_DIR/notebooklm_base.mp4'\" >> /tmp/concat_list_nb.txt\nfi\n\n# Step 1: Concatenate all Veo clips\nffmpeg -y -f concat -safe 0 -i /tmp/concat_list.txt \\\n  -c:v libx264 -crf 18 -preset medium -r 24 -s 1920x1080 \\\n  /tmp/raw_video.mp4 2>/dev/null\n\n# Step 2: Apply Ken Burns effect to real photo (10 sec)\nffmpeg -y -loop 1 -i /tmp/real_photo.jpg \\\n  -vf \"zoompan=z='min(zoom+0.0015,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=250:s=1920x1080\" \\\n  -t 10 -c:v libx264 -r 25 /tmp/ken_burns.mp4 2>/dev/null\n\n# Step 3: Merge video sources\nffmpeg -y \\\n  -i /tmp/raw_video.mp4 \\\n  -i /tmp/ken_burns.mp4 \\\n  -filter_complex '[0:v][1:v]concat=n=2:v=1:a=0[v]' \\\n  -map '[v]' /tmp/merged_video.mp4 2>/dev/null\n\n# Step 4: Final assembly with audio\n# Background music - use royalty free track if available\nif [ -f /home/ubuntu/background_music.mp3 ]; then\n  ffmpeg -y \\\n    -i /tmp/merged_video.mp4 \\\n    -i \"$VOICEOVER_PATH\" \\\n    -i /home/ubuntu/background_music.mp3 \\\n    -filter_complex '[2:a]volume=0.08,aloop=loop=-1:size=2e+09[bg];[1:a][bg]amix=inputs=2:duration=first:dropout_transition=3[audio]' \\\n    -map 0:v -map '[audio]' \\\n    -c:v libx264 -crf 18 -c:a aac -b:a 192k \\\n    -shortest -movflags +faststart \\\n    \"$FINAL_PATH\" 2>/dev/null\nelse\n  ffmpeg -y \\\n    -i /tmp/merged_video.mp4 \\\n    -i \"$VOICEOVER_PATH\" \\\n    -c:v libx264 -crf 18 -c:a aac -b:a 192k \\\n    -shortest -movflags +faststart \\\n    \"$FINAL_PATH\" 2>/dev/null\nfi\n\necho \"ASSEMBLY_COMPLETE: $FINAL_PATH\""
+      },
+      "id": "node_ffmpeg",
+      "name": "FFmpeg — Assemble Final Video",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1300, 540],
+      "notes": "Stitches: Veo clips + NotebookLM base + Ken Burns photo + voiceover + background music. Outputs 1080p YouTube-optimized MP4. Requires FFmpeg installed on n8n server."
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "name": "={{ $json.seo_title }}",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_GDRIVE_FOLDER_ID",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "node_gdrive",
+      "name": "Save to Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1500, 480],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "name": "Google Drive Account"
+        }
+      },
+      "notes": "Backs up final video to Google Drive. Replace YOUR_GDRIVE_FOLDER_ID with your folder ID."
+    },
+    {
+      "parameters": {
+        "resource": "video",
+        "operation": "upload",
+        "title": "={{ $json.seo_title }}",
+        "description": "={{ $json.seo_description + '\\n\\n' + $json.chapters }}",
+        "categoryId": "27",
+        "privacyStatus": "private",
+        "options": {
+          "tags": "={{ $json.seo_tags.join(',') }}",
+          "publishAt": "={{ $json.scheduled_publish_time }}",
+          "defaultLanguage": "en",
+          "selfDeclaredMadeForKids": false
+        }
+      },
+      "id": "node_youtube",
+      "name": "YouTube — Upload + Schedule",
+      "type": "n8n-nodes-base.youTube",
+      "typeVersion": 1,
+      "position": [1700, 540],
+      "credentials": {
+        "youTubeOAuth2Api": {
+          "name": "YouTube Account"
+        }
+      },
+      "notes": "Uploads video as PRIVATE with scheduled publish time. Category 27 = Education. Requires YouTube Data API v3 enabled in Google Cloud Console + OAuth2 credentials in n8n."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": "YOUR_GOOGLE_SHEET_ID",
+        "sheetName": "Topics",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "STATUS": "DONE",
+            "YOUTUBE_URL": "=https://youtube.com/watch?v={{ $json.id }}",
+            "PUBLISH_DATE": "={{ $json.scheduled_publish_time }}"
+          }
+        },
+        "where": {
+          "values": [
+            {
+              "lookupColumn": "TOPIC",
+              "lookupValue": "={{ $('Get Next Topic').first().json.TOPIC }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node_sheets_update",
+      "name": "Mark DONE in Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1900, 540],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Google Sheets Account"
+        }
+      },
+      "notes": "Updates the source row: STATUS=DONE, logs YouTube URL, publish date. Creates full audit trail."
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[ { "node": "Get Next Topic", "type": "main", "index": 0 } ]]
+    },
+    "Get Next Topic": {
+      "main": [[ { "node": "Gemini — Research + Script + SEO", "type": "main", "index": 0 } ]]
+    },
+    "Gemini — Research + Script + SEO": {
+      "main": [[ { "node": "Parse Gemini Response", "type": "main", "index": 0 } ]]
+    },
+    "Parse Gemini Response": {
+      "main": [[
+        { "node": "NotebookLM — Base Video Draft", "type": "main", "index": 0 },
+        { "node": "Wikimedia — Get Real Photo", "type": "main", "index": 0 },
+        { "node": "Split Into Scene Prompts", "type": "main", "index": 0 },
+        { "node": "Google TTS — Neural2 Voiceover", "type": "main", "index": 0 }
+      ]]
+    },
+    "NotebookLM — Base Video Draft": {
+      "main": [[ { "node": "FFmpeg — Assemble Final Video", "type": "main", "index": 0 } ]]
+    },
+    "Wikimedia — Get Real Photo": {
+      "main": [[ { "node": "Extract Photo URL", "type": "main", "index": 0 } ]]
+    },
+    "Extract Photo URL": {
+      "main": [[ { "node": "Download Real Photo", "type": "main", "index": 0 } ]]
+    },
+    "Download Real Photo": {
+      "main": [[ { "node": "FFmpeg — Assemble Final Video", "type": "main", "index": 0 } ]]
+    },
+    "Split Into Scene Prompts": {
+      "main": [[ { "node": "Fal.ai — Generate Video Clip", "type": "main", "index": 0 } ]]
+    },
+    "Fal.ai — Generate Video Clip": {
+      "main": [[ { "node": "Wait for Generation", "type": "main", "index": 0 } ]]
+    },
+    "Wait for Generation": {
+      "main": [[ { "node": "Download Video Clip", "type": "main", "index": 0 } ]]
+    },
+    "Download Video Clip": {
+      "main": [[ { "node": "FFmpeg — Assemble Final Video", "type": "main", "index": 0 } ]]
+    },
+    "Google TTS — Neural2 Voiceover": {
+      "main": [[ { "node": "Decode TTS Audio", "type": "main", "index": 0 } ]]
+    },
+    "Decode TTS Audio": {
+      "main": [[ { "node": "FFmpeg — Assemble Final Video", "type": "main", "index": 0 } ]]
+    },
+    "FFmpeg — Assemble Final Video": {
+      "main": [[ { "node": "Save to Google Drive", "type": "main", "index": 0 } ]]
+    },
+    "Save to Google Drive": {
+      "main": [[ { "node": "YouTube — Upload + Schedule", "type": "main", "index": 0 } ]]
+    },
+    "YouTube — Upload + Schedule": {
+      "main": [[ { "node": "Mark DONE in Sheet", "type": "main", "index": 0 } ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "history-psychology-youtube-automation"
+  },
+  "tags": ["YouTube", "Automation", "AI", "History", "Psychology"],
+  "_SETUP_INSTRUCTIONS": {
+    "step1_google_sheets": "Create a Google Sheet with columns: TOPIC | STATUS | PILLAR | YOUTUBE_URL | PUBLISH_DATE | NOTES. Fill TOPIC rows with your 30 video topics. Set STATUS to PENDING. Replace YOUR_GOOGLE_SHEET_ID in nodes.",
+    "step2_gemini": "Get API key from aistudio.google.com. Add as HTTP Header credential in n8n (name: geminiApiKey).",
+    "step3_fal_ai": "Create account at fal.ai. Get API key from dashboard. Replace YOUR_FAL_AI_API_KEY in the Fal.ai node.",
+    "step4_google_cloud": "Create project at console.cloud.google.com. Enable: Text-to-Speech API, YouTube Data API v3, Google Sheets API, Google Drive API. Create OAuth2 credentials and add to n8n.",
+    "step5_notebooklm_py": "On your n8n server: pip install notebooklm-py. Then run once: notebooklm login (authenticates with your Google account). After this it runs headlessly.",
+    "step6_ffmpeg": "On n8n server: apt-get install ffmpeg (Linux) or brew install ffmpeg (Mac). Verify: ffmpeg -version.",
+    "step7_background_music": "Download a free cinematic background track from pixabay.com/music (search: 'documentary cinematic'). Save as /home/ubuntu/background_music.mp3 on your n8n server.",
+    "step8_test": "Run workflow manually with ONE topic. Watch each node. First run takes ~90 minutes. Subsequent runs are fully automatic on schedule.",
+    "important_notes": [
+      "Meta AI and Google Flow have NO public API — they cannot be automated. Fal.ai Veo 3.1 replaces them entirely in this pipeline.",
+      "notebooklm-py uses unofficial Google APIs and may break if Google changes internal endpoints. Pipeline continues working via Fal.ai even if NotebookLM-py fails.",
+      "YouTube API requires OAuth2 — you must authenticate your YouTube channel once in n8n credentials.",
+      "Videos upload as PRIVATE and auto-publish at scheduled time. This is required for scheduled publishing via API.",
+      "Estimated cost: ~$7 per video using 8 Fal.ai clips. Reduce to 3 clips to bring cost to ~$3/video."
+    ]
+  }
+}
